@@ -7,30 +7,37 @@
 // LCD configuration  
 #define LCD_I2C_ADDRESS 0x27
 LiquidCrystal_I2C lcd(LCD_I2C_ADDRESS, 16, 2);
-
+// Ultrasonic sensor configuration
+#define TRIG_PIN 11  // Trig pin connected to D11
+#define ECHO_PIN 10  // Echo pin connected to D10
 // Button pins
-const int btnUp = 3;      // Up button
-const int btnDown = 2;    // Down button
-const int btnSelect = 4;  // Select button
-const int btnCancel = 5;  // Cancel button
+const int btnUp = A2;      // Up button
+const int btnDown = A3;    // Down button
+const int btnSelect = A0;  // Select button
+const int btnCancel = A1;  // Cancel button
 
 // Relay and Servo configuration
-const int relayPin = A0;  // Relay module connected to A0
-const int servoPin = 10;  // Servo motor connected to D10
+const int relayPin = 2;  // Relay module connected to A0
+const int servoPin = 6;  // Servo motor connected to D6
+const int servoPin2 = 5; 
+const int buzzer = 3;
 Servo feederServo;        // Create
-
+Servo trapServo;
 // DS1302 Pin Definitions
 #define DS1302_IO 8
 #define DS1302_CLK 7
 #define DS1302_RST 9
 
-
+unsigned long lastScheduleCheckTime = 0;  // Timestamp of the last schedule check
+const unsigned long scheduleCheckInterval = 60000;  // 60 seconds (in milliseconds)
+unsigned long feedingStartTime = 0;  // Timestamp for scheduled feeding
+bool feedingInProgress = false;      // Flag to track if feeding is in progress
 // Initialize RTC instance
 ThreeWire myWire(DS1302_IO, DS1302_CLK, DS1302_RST); // IO, SCLK, CE
 RtcDS1302<ThreeWire> Rtc(myWire);
 
 // DHT sensor configuration
-#define DHTPIN 11         // Pin connected to DHT11 sensor
+#define DHTPIN 12         // Pin connected to DHT11 sensor
 #define DHTTYPE DHT11     // DHT sensor type
 DHT dht(DHTPIN, DHTTYPE); // Initialize DHT sensor
 
@@ -48,14 +55,14 @@ unsigned long dispenseTime = 0; // Dispense time in milliseconds
 
 bool isIdle = true; // Flag to track whether the system is in idle mode
 unsigned long lastUpdate = 0; // Timestamp for periodic updates
-const unsigned long updateInterval = 1000; // Update interval in milliseconds
+const unsigned long updateInterval = 500; // Update interval in milliseconds
 unsigned long idleStartTime = 0;
 const unsigned long idleTimeout = 7000;     // Timeout for inactivity (7 seconds)
 
 // Debounce
 unsigned long lastDebounceTime = 0;
 const unsigned long debounceDelay = 200;  // Debounce delay in milliseconds
-
+bool trapActivated = false;
 // Function prototypes
 bool isButtonPressed(int pin);
 void updateMenu();
@@ -73,33 +80,48 @@ void updateIdleDisplay();
 
 void setup() {
   // Initialize LCD
+  Serial.begin(9600);
   lcd.init();
   lcd.backlight();
   dht.begin();
-  // Set button pins as input with pullup resistors
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
   pinMode(btnUp, INPUT_PULLUP);
   pinMode(btnDown, INPUT_PULLUP);
   pinMode(btnSelect, INPUT_PULLUP);
   pinMode(btnCancel, INPUT_PULLUP);
-
+  pinMode(buzzer, OUTPUT);
   pinMode(relayPin, OUTPUT);
-  digitalWrite(relayPin, LOW);
-
+  digitalWrite(relayPin, HIGH);
+  digitalWrite(buzzer, LOW);
   feederServo.attach(servoPin);
+  trapServo.attach(servoPin2);
   feederServo.write(0);  // Start servo at position 0
+  trapServo.write(0);
   Rtc.Begin();
-  // Initial; idle state
+  
+  // ---- Set RTC Time (Run Once, Then Comment This Line Out) ----
+  
+  
+  // Initial idle state
   resetToIdle();
 }
 
+
 void loop() {
   unsigned long currentMillis = millis();
-  
+  checkScheduledFeeding();
+  readUltrasonicSensor(); 
+  if (feedingInProgress && (currentMillis - feedingStartTime >= dispenseTime)) {
+    feedingInProgress = false;  // Reset feeding state
+    resetToIdle();              // Return to idle state
+  }
   // Check if the system is in idle state or menu
   // Update the idle state every second
   if (isIdle && (currentMillis - lastUpdate >= updateInterval)) {
     lastUpdate = currentMillis;
     updateIdleState();
+    
   }
 
   // Automatically reset to idle if inactive for 7 seconds
@@ -141,6 +163,34 @@ void loop() {
   if (isButtonPressed(btnCancel)) {
     resetToIdle();
     idleStartTime = currentMillis;  // Reset idle timer on interaction
+  }
+
+  
+}
+
+
+void checkScheduledFeeding() {
+  unsigned long currentMillis = millis();
+  
+  // Only check the schedule every 60 seconds
+  if (currentMillis - lastScheduleCheckTime >= scheduleCheckInterval) {
+    lastScheduleCheckTime = currentMillis;  // Update last check time
+    
+    // Get the current time
+    RtcDateTime now = Rtc.GetDateTime();
+    int currentHour = now.Hour();
+    int currentMinute = now.Minute();
+
+    // Check if there is a scheduled feeding
+    for (int i = 0; i < scheduleFrequency; i++) {
+      if (scheduleHours[i] == currentHour && scheduleMinutes[i] == currentMinute && !feedingInProgress) {
+        // Schedule matches the current time, trigger feeding
+        feedingStartTime = millis();  // Set the feeding start time
+        feedingInProgress = true;     // Mark feeding as in progress
+        manualFeeding();              // Call manual feeding function
+        break;                        // Exit after the first match
+      }
+    }
   }
 }
 
@@ -189,7 +239,8 @@ void manualFeeding() {
   lcd.print("Manual Feeding...");
   
   // Turn on the relay
-  digitalWrite(relayPin, HIGH);
+  digitalWrite(relayPin, LOW);
+  digitalWrite(buzzer, HIGH);
 
   // Move the servo to 180 degrees
   for (int pos = 0; pos <= 180; pos += 5) {
@@ -201,7 +252,8 @@ void manualFeeding() {
   delay(3000);
 
   // Turn off the relay and reset servo to 0 degrees
-  digitalWrite(relayPin, LOW);
+  digitalWrite(relayPin, HIGH);
+  digitalWrite(buzzer, LOW);
   for (int pos = 180; pos >= 0; pos -= 5) {
     feederServo.write(pos);
     delay(50);  // Small delay between movements
@@ -218,6 +270,8 @@ void manualFeeding() {
 // Function to reset the trap (empty function)
 void resetTrap() {
   lcd.clear();
+  trapServo.write(0);
+  trapActivated = false;
   lcd.setCursor(0, 0);
   lcd.print("Resetting Trap...");
   delay(1000);  // Empty action for reset, just a placeholder
@@ -272,7 +326,7 @@ void viewSchedule() {
       if (scheduleIndex >= scheduleFrequency) {
         scheduleIndex = 0;  // Wrap around if the user goes beyond the last schedule
       }
-      delay(300);  // debounce delay
+     
     }
 
     if (isButtonPressed(btnDown)) {
@@ -280,7 +334,7 @@ void viewSchedule() {
       if (scheduleIndex < 0) {
         scheduleIndex = scheduleFrequency - 1;  // Wrap around to the last schedule
       }
-      delay(300);  // debounce delay
+     
     }
 
     // Exit when Select or Cancel is pressed
@@ -289,7 +343,7 @@ void viewSchedule() {
       viewing = false;  // Exit the schedule view
     }
 
-    delay(300);  // Delay to control screen refresh rate and prevent blinking
+    
   }
 }
 
@@ -317,7 +371,7 @@ void setScheduleFrequency() {
       if (scheduleFrequency > 10) {
         scheduleFrequency = 1;  // Wrap around to 1 if it exceeds 10
       }
-      delay(200);  // debounce delay
+      
     }
 
     if (isButtonPressed(btnDown)) {
@@ -325,7 +379,7 @@ void setScheduleFrequency() {
       if (scheduleFrequency < 1) {
         scheduleFrequency = 10;  // Wrap around to 10 if it goes below 1
       }
-      delay(200);  // debounce delay
+      
     }
 
     if (isButtonPressed(btnSelect)) {
@@ -352,12 +406,12 @@ void setScheduleTime(int scheduleIndex) {
 
     if (isButtonPressed(btnUp)) {
       hour = (hour + 1) % 24;  // Increment hour, but it won't go above 23 (wrap around)
-      delay(200);              // debounce delay
+      
     }
 
     if (isButtonPressed(btnDown)) {
       hour = (hour - 1 + 24) % 24;  // Decrement hour, but it won't go below 0 (wrap around)
-      delay(200);                   // debounce delay
+      
     }
 
     if (isButtonPressed(btnSelect)) {
@@ -380,12 +434,12 @@ void setScheduleTime(int scheduleIndex) {
 
     if (isButtonPressed(btnUp)) {
       minute = (minute + 1) % 60;  // Increment minute, but it won't go above 59 (wrap around)
-      delay(200);                  // debounce delay
+      
     }
 
     if (isButtonPressed(btnDown)) {
       minute = (minute - 1 + 60) % 60;  // Decrement minute, but it won't go below 0 (wrap around)
-      delay(200);                       // debounce delay
+      
     }
 
     if (isButtonPressed(btnSelect)) {
@@ -418,12 +472,12 @@ void setDispenseDuration() {
     
     if (isButtonPressed(btnUp)) {
       dispenseDuration = (dispenseDuration == 0) ? 1 : 0;
-      delay(200);  // debounce delay
+      
     }
 
     if (isButtonPressed(btnDown)) {
       dispenseDuration = (dispenseDuration == 0) ? 1 : 0;
-      delay(200);  // debounce delay
+      
     }
 
     if (isButtonPressed(btnSelect)) {
@@ -452,12 +506,12 @@ void setDispenseTime() {
 
     if (isButtonPressed(btnUp)) {
       dispenseTime += 1000;  // Increment time by 1 second
-      delay(200);  // debounce delay
+      
     }
 
     if (isButtonPressed(btnDown)) {
       dispenseTime = (dispenseTime > 1000) ? dispenseTime - 1000 : 0;  // Decrement time, don't go below 0
-      delay(200);  // debounce delay
+      
     }
 
     if (isButtonPressed(btnSelect)) {
@@ -476,7 +530,7 @@ void setDispenseTime() {
   }
 }
 
-A
+
 // Function to check if a button is pressed (debounced)
 bool isButtonPressed(int pin) {
   static unsigned long lastDebounceTime = 0;
@@ -524,6 +578,25 @@ void updateIdleDisplay() {
     lcd.print(humidity, 1);    // Display humidity with 1 decimal
     lcd.print("%");
   }
+}
+void readUltrasonicSensor() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH);
+  float distance = duration * 0.034 / 2;
+  Serial.print("Distance: ");
+  Serial.print(distance);
+  Serial.println(" cm");
+  if (distance > 0 && distance < 20) { // Object detected within 40 cm
+        if (!trapActivated) {
+            trapServo.write(180); // Move second servo to 180° only once
+            trapActivated = true;
+        }
+    }
 }
 
 void updateIdleState() {
