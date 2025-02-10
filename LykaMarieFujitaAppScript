@@ -1,0 +1,50 @@
+// https://docs.google.com/spreadsheets/d/1re70LaUYCoa8kDdXuaxsh5uzO_pkv3zmGZHj711HB-Q/edit?gid=0#gid=0
+
+function doGet(e) {
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = spreadsheet.getSheetByName("Data");
+
+  if (!sheet) {
+    return ContentService.createTextOutput("Error: Sheet 'Data' not found.")
+      .setMimeType(ContentService.MimeType.TEXT);
+  }
+
+  var timestamp = new Date();
+  var assetName = e.parameter.asset_name || "Unknown";
+  var assetID = e.parameter.asset_id || "Unknown";
+  var studentName = e.parameter.student_name || "Unknown";
+  var studentID = e.parameter.student_id || "Unknown";
+
+  // Fetch the last recorded action for this asset
+  var lastAction = getLastActionForAsset(assetID);
+  
+  var action = "Borrowed"; // Default to Borrowed
+
+  // If the last recorded action was "Borrowed", mark as "Returned"
+  if (lastAction == "Borrowed") {
+    action = "Returned";
+  }
+
+  // Append the new row with the required columns
+  sheet.appendRow([timestamp, assetName, assetID, studentName, studentID, action]);
+
+  var lastRow = sheet.getLastRow();
+  var color = action === "Returned" ? "#90EE90" : "#FF6961"; // Green for returned, Red for borrowed  
+  sheet.getRange(lastRow, 1, 1, sheet.getLastColumn()).setBackground(color);
+
+  return ContentService.createTextOutput("Data Added Successfully")
+    .setMimeType(ContentService.MimeType.TEXT);
+}
+
+// Function to get the last recorded action for a specific asset
+function getLastActionForAsset(assetID) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Data");
+  var data = sheet.getDataRange().getValues();
+
+  for (var i = data.length - 1; i > 0; i--) { // Start from the latest row
+    if (data[i][2] == assetID) { // Column C contains Asset ID
+      return data[i][5]; // Column F contains the Action
+    }
+  }
+  return "None"; // No record found
+}  
